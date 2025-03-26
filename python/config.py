@@ -16,13 +16,13 @@ EMB_SIZE = 32
 GENERATE_NUM = 50  # 減少生成數量
 FILTER_SIZE = list(range(1,SEQ_LENGTH))
 NUM_FILTER =  ([100] + [200] * 9 + [160] * SEQ_LENGTH)[0:SEQ_LENGTH-1]
-DIS_NUM_EPOCH = 30  # 減少訓練輪次
-DIS_NUM_EPOCH_PRETRAIN = 20
-GEN_NUM_EPOCH = 30
-GEN_NUM_EPOCH_PRETRAIN = 20
+DIS_NUM_EPOCH = 3  # 減少訓練輪次
+DIS_NUM_EPOCH_PRETRAIN = 2
+GEN_NUM_EPOCH = 3
+GEN_NUM_EPOCH_PRETRAIN = 2
 GEN_HIDDEN_DIM = 48
 ROLLOUT_ITER = 24  # 減少rollout迭代次數
-TOTAL_BATCH = 50  # 減少總批次
+TOTAL_BATCH = 10  # 減少總批次
 
 # T5相關配置
 T5_MODEL_NAME = "uer/t5-base-chinese-cluecorpussmall"  # 使用的T5模型

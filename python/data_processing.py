@@ -7,7 +7,7 @@ import shutil
 import torch
 from transformers import T5ForConditionalGeneration, BertTokenizer  # 修改這裡
 import pandas as pd
-from config import SEQ_LENGTH, GENERATE_NUM, DEVICE, PATH, T5_MODEL_NAME, T5_TASK_PREFIX, T5_SUMMARY_LENGTH, MAX_WINDOW_SIZE
+from config import SEQ_LENGTH, GENERATE_NUM, DEVICE, PATH, T5_MODEL_NAME, T5_TASK_PREFIX, T5_SUMMARY_LENGTH, MAX_WINDOW_SIZE, openLog
 
 # 全局tokenizer
 global_tokenizer = None
@@ -198,7 +198,7 @@ def process_discussion_data(dataframe, tokenizer, max_tokens=SEQ_LENGTH, max_win
     return all_training_samples
 
 def prepare_sliding_window_data(file_path, tokenizer=None, max_tokens=SEQ_LENGTH, max_window_size=MAX_WINDOW_SIZE):
-    """準備滑動窗口訓練資料"""
+    """準備滑動窗口訓練資料 - 添加留言數量檢查"""
     if tokenizer is None:
         tokenizer = get_tokenizer()
     
@@ -210,8 +210,39 @@ def prepare_sliding_window_data(file_path, tokenizer=None, max_tokens=SEQ_LENGTH
     else:
         raise ValueError("不支持的文件格式")
     
+    # 統計留言數量
+    discussion_counts = {}
+    current_post = None
+    current_count = 0
+    
+    for idx, row in df.iterrows():
+        post = row['post']
+        if current_post is None or post != current_post:
+            if current_post is not None:
+                discussion_counts[current_post] = current_count
+            current_post = post
+            current_count = 1
+        else:
+            current_count += 1
+    
+    # 保存最後一個討論串的留言數量
+    if current_post is not None:
+        discussion_counts[current_post] = current_count
+    
+    # 打印討論串留言數量統計
+    log = openLog('discussion_stats.txt')
+    log.write("討論串留言數量統計:\n")
+    for post, count in discussion_counts.items():
+        log.write(f"討論串: {post[:50]}... - 留言數量: {count}\n")
+    log.close()
+    
     # 處理討論資料
     training_samples = process_discussion_data(df, tokenizer, max_tokens, max_window_size)
+    
+    # 為每個訓練樣本添加留言數量信息
+    for sample in training_samples:
+        post = sample['post']
+        sample['message_count'] = discussion_counts.get(post, 0)
     
     # 將訓練樣本轉換為模型輸入格式
     inputs = tokenizer([sample['input'] for sample in training_samples], 
@@ -230,7 +261,8 @@ def prepare_sliding_window_data(file_path, tokenizer=None, max_tokens=SEQ_LENGTH
         'input_ids': inputs.input_ids.to(DEVICE),
         'attention_mask': inputs.attention_mask.to(DEVICE),
         'labels': targets.input_ids.to(DEVICE),
-        'samples': training_samples  # 保留原始樣本信息
+        'samples': training_samples,  # 保留原始樣本信息
+        'discussion_counts': discussion_counts  # 添加討論串留言數量信息
     }
 
 def prepare_dialogue_pairs(token_ids, tokenizer):

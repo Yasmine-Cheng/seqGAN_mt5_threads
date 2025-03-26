@@ -164,7 +164,7 @@ def set_epoch(model, epoch, total):
         model.total_epochs = total
 
 def pretrain_generator_with_sliding_windows(file_path, batch_size=8, epochs=GEN_NUM_EPOCH):
-    """使用滑動窗口策略預訓練T5生成器"""
+    """使用滑動窗口策略預訓練T5生成器 - 考慮留言數量"""
     # 創建生成器和tokenizer
     generator = T5Generator()
     generator = nn.DataParallel(generator)
@@ -173,6 +173,9 @@ def pretrain_generator_with_sliding_windows(file_path, batch_size=8, epochs=GEN_
     
     # 獲取滑動窗口訓練數據
     train_data = prepare_sliding_window_data(file_path, tokenizer)
+    
+    # 獲取討論串留言數量信息
+    discussion_counts = train_data.get('discussion_counts', {})
     
     # 創建優化器
     optimizer = torch.optim.AdamW(generator.parameters(), lr=T5_LEARNING_RATE)
@@ -184,51 +187,76 @@ def pretrain_generator_with_sliding_windows(file_path, batch_size=8, epochs=GEN_
     input_ids = train_data['input_ids']
     attention_mask = train_data['attention_mask']
     labels = train_data['labels']
+    samples = train_data['samples']
+    
+    # 按留言數量分組訓練樣本
+    sample_groups = {}
+    for i, sample in enumerate(samples):
+        message_count = sample.get('message_count', 0)
+        # 將留言數量分組 (0-5, 6-10, 11-15, 16+)
+        group_key = min(message_count // 5, 3)  
+        if group_key not in sample_groups:
+            sample_groups[group_key] = []
+        sample_groups[group_key].append(i)
     
     # 訓練循環
     for epoch in range(epochs):
         # 設置當前epoch
         set_epoch(generator, epoch, epochs)
         
-        # 打亂資料順序
-        indices = torch.randperm(len(input_ids))
-        shuffled_input_ids = input_ids[indices]
-        shuffled_attention_mask = attention_mask[indices]
-        shuffled_labels = labels[indices]
+        # 紀錄每個組的損失
+        group_losses = {key: [] for key in sample_groups.keys()}
         
-        pointer = 0
-        total_loss = 0
-        batch_count = 0
+        # 按組進行訓練
+        for group_key, indices in sample_groups.items():
+            # 動態調整批次大小 - 留言數量多的組使用較小批次
+            dynamic_batch_size = max(1, batch_size // (group_key + 1))
+            
+            # 打亂這個組內的索引
+            group_indices = torch.tensor(indices)[torch.randperm(len(indices))]
+            
+            log.write(f'      處理留言組 {group_key} (留言數 {group_key*5}-{(group_key+1)*5-1}), 樣本數: {len(indices)}, 批次大小: {dynamic_batch_size}\n')
+            
+            # 批次訓練
+            pointer = 0
+            while pointer + dynamic_batch_size <= len(group_indices):
+                # 獲取批次索引
+                batch_indices = group_indices[pointer:pointer+dynamic_batch_size]
+                
+                # 獲取批次數據
+                batch_input_ids = input_ids[batch_indices]
+                batch_attention_mask = attention_mask[batch_indices]
+                batch_labels = labels[batch_indices]
+                
+                # 模型訓練
+                outputs = generator(
+                    input_ids=batch_input_ids,
+                    attention_mask=batch_attention_mask,
+                    labels=batch_labels
+                )
+                
+                loss = outputs.loss
+                
+                # 反向傳播
+                optimizer.zero_grad()
+                loss.backward()
+                torch.nn.utils.clip_grad_norm_(generator.parameters(), 1.0)
+                optimizer.step()
+                
+                # 更新統計
+                group_losses[group_key].append(loss.item())
+                pointer += dynamic_batch_size
+                
+                # 立即清理內存
+                torch.cuda.empty_cache()
         
-        while pointer + batch_size <= len(shuffled_input_ids):
-            # 獲取批次
-            batch_input_ids = shuffled_input_ids[pointer:pointer+batch_size]
-            batch_attention_mask = shuffled_attention_mask[pointer:pointer+batch_size]
-            batch_labels = shuffled_labels[pointer:pointer+batch_size]
-            
-            # 模型訓練
-            outputs = generator(
-                input_ids=batch_input_ids,
-                attention_mask=batch_attention_mask,
-                labels=batch_labels
-            )
-            
-            loss = outputs.loss
-            
-            # 反向傳播
-            optimizer.zero_grad()
-            loss.backward()
-            torch.nn.utils.clip_grad_norm_(generator.parameters(), 1.0)
-            optimizer.step()
-            
-            # 更新統計
-            total_loss += loss.item()
-            batch_count += 1
-            pointer += batch_size
-            
         # 紀錄進度
-        avg_loss = total_loss / batch_count if batch_count > 0 else 0
-        log.write('      epoch: {} loss: {:.4f}\n'.format(epoch+1, avg_loss))
+        log.write('      epoch: {} '.format(epoch+1))
+        for group_key, losses in group_losses.items():
+            if losses:
+                avg_loss = sum(losses) / len(losses)
+                log.write(f'群組 {group_key} loss: {avg_loss:.4f} ')
+        log.write('\n')
     
     log.close()
     return generator
